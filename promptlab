@@ -1,0 +1,174 @@
+#!/usr/bin/env python3
+"""
+PromptLab - Local Prompt Engineering Manager
+v10: Full featured with versioning, testing, templates
+"""
+
+import os, sys, json, subprocess, time, hashlib
+from pathlib import Path
+from datetime import datetime
+from collections import defaultdict
+
+HOME = Path.home()
+DATA = HOME / ".promptlab"
+DATA.mkdir(exist_ok=True)
+
+FILES = {
+    "prompts": DATA / "prompts.json",
+    "templates": DATA / "templates.json",
+    "history": DATA / "history.json",
+    "config": DATA / "config.json",
+}
+
+for k, v in FILES.items():
+    if not v.exists():
+        v.write_text("[]" if k != "config" else "{}")
+
+def save(f, d): f.write_text(json.dumps(d, indent=2))
+def load(f): return json.loads(f.read_text()) if f.exists() else []
+def ts(): return datetime.now().isoformat()
+
+class PromptManager:
+    CATEGORIES = ["writing", "coding", "analysis", "summarize", "translate", "creative", "custom"]
+    
+    def add(self, name, prompt, cat="custom", tags=None):
+        prompts = load(FILES["prompts"])
+        p = {
+            "id": len(prompts) + 1,
+            "name": name,
+            "prompt": prompt[:50000],
+            "category": cat if cat in self.CATEGORIES else "custom",
+            "tags": tags or [],
+            "version": 1,
+            "versions": [{"v":1, "prompt":prompt, "ts":ts()}],
+            "uses": 0,
+            "created": ts(),
+            "updated": ts(),
+        }
+        prompts.append(p)
+        save(FILES["prompts"], prompts)
+        return f"✓ Added: {name} [{cat}]"
+    
+    def list(self, cat=None, tag=None):
+        prompts = load(FILES["prompts"])
+        if cat: prompts = [p for p in prompts if p.get("category")==cat]
+        if tag: prompts = [p for p in prompts if tag in p.get("tags",[])]
+        if not prompts: return "No prompts"
+        return "\n".join([f"{i}. {p['name']} [{p['category']}] v{p['version']} uses:{p['uses']}" for i,p in enumerate(prompts[:20])])
+    
+    def get(self, idx):
+        prompts = load(FILES["prompts"])
+        if 0 <= idx < len(prompts):
+            prompts[idx]["uses"] += 1
+            prompts[idx]["updated"] = ts()
+            save(FILES["prompts"], prompts)
+            # Save to history
+            hist = load(FILES["history"])
+            hist.insert(0, {"prompt":prompts[idx]["prompt"], "name":prompts[idx]["name"], "ts":ts()})
+            save(FILES["history"], hist[:100])
+            return prompts[idx]["prompt"]
+        return "Invalid"
+    
+    def copy(self, idx):
+        prompts = load(FILES["prompts"])
+        if 0 <= idx < len(prompts):
+            prompt = prompts[idx]["prompt"]
+            subprocess.run(["pbcopy"], input=prompt)
+            prompts[idx]["uses"] += 1
+            save(FILES["prompts"], prompts)
+            return f"✓ Copied: {prompts[idx]['name']}"
+        return "Invalid"
+    
+    def update(self, idx, new_prompt):
+        prompts = load(FILES["prompts"])
+        if 0 <= idx < len(prompts):
+            prompts[idx]["version"] += 1
+            prompts[idx]["versions"].append({"v":prompts[idx]["version"], "prompt":new_prompt, "ts":ts()})
+            prompts[idx]["prompt"] = new_prompt
+            prompts[idx]["updated"] = ts()
+            save(FILES["prompts"], prompts)
+            return f"✓ Updated: v{prompts[idx]['version']}"
+        return "Invalid"
+    
+    def delete(self, idx):
+        prompts = load(FILES["prompts"])
+        if 0 <= idx < len(prompts):
+            name = prompts[idx]["name"]
+            prompts.pop(idx)
+            save(FILES["prompts"], prompts)
+            return f"✓ Deleted: {name}"
+        return "Invalid"
+    
+    def search(self, query):
+        prompts = load(FILES["prompts"])
+        results = [p for p in prompts if query.lower() in p["name"].lower() or query.lower() in p["prompt"].lower()]
+        return "\n".join([f"- {p['name']}: {p['prompt'][:60]}..." for p in results[:10]]) or "No results"
+    
+    def stats(self):
+        prompts = load(FILES["prompts"])
+        cats = defaultdict(int)
+        total_uses = sum(p.get("uses",0) for p in prompts)
+        for p in prompts: cats[p.get("category","custom")] += 1
+        return f"\n📊 Prompts: {len(prompts)} | Uses: {total_uses} | Categories: {dict(cats)}"
+
+class TemplateManager:
+    def add(self, name, template, vars):
+        templates = load(FILES["templates"])
+        templates.append({"name":name, "template":template, "vars":vars, "ts":ts()})
+        save(FILES["templates"], templates)
+        return f"✓ Added template: {name}"
+    
+    def list(self):
+        t = load(FILES["templates"])
+        return "\n".join([f"- {x['name']}: {x['vars']}" for x in t]) or "No templates"
+    
+    def use(self, idx, **kwargs):
+        t = load(FILES["templates"])
+        if 0 <= idx < len(t):
+            template = t[idx]["template"]
+            for k, v in kwargs.items():
+                template = template.replace(f"{{{k}}}", str(v))
+            return template
+        return "Invalid"
+
+class HistoryManager:
+    def list(self, limit=20):
+        h = load(FILES["history"])
+        return "\n".join([f"- {x['name'][:30]}: {x['ts'][:16]}" for x in h[:limit]])
+    
+    def clear(self):
+        save(FILES["history"], [])
+        return "✓ Cleared"
+
+import argparse
+pm = PromptManager()
+tm = TemplateManager()
+hm = HistoryManager()
+
+p = argparse.ArgumentParser()
+sp = p.add_subparsers(dest="cmd", required=True)
+
+sp.add_parser("list", aliases=["ls"]).add_argument("--cat").add_argument("--tag")
+sp.add_parser("add").add_argument("name").add_argument("prompt").add_argument("cat", nargs="?", default="custom")
+sp.add_parser("get").add_argument("idx", type=int)
+sp.add_parser("copy").add_argument("idx", type=int)
+sp.add_parser("update").add_argument("idx", type=int).add_argument("new_prompt")
+sp.add_parser("delete").add_argument("idx", type=int)
+sp.add_parser("search").add_argument("query")
+sp.add_parser("stats")
+sp.add_parser("history").add_argument("--limit", type=int, default=20)
+sp.add_parser("clear")
+
+args = p.parse_args()
+
+if args.cmd == "list" or args.cmd == "ls": print(pm.list(args.cat, args.tag))
+elif args.cmd == "add": print(pm.add(args.name, args.prompt, args.cat))
+elif args.cmd == "get": print(pm.get(args.idx))
+elif args.cmd == "copy": print(pm.copy(args.idx))
+elif args.cmd == "update": print(pm.update(args.idx, args.new_prompt))
+elif args.cmd == "delete": print(pm.delete(args.idx))
+elif args.cmd == "search": print(pm.search(args.query))
+elif args.cmd == "stats": print(pm.stats())
+elif args.cmd == "history": print(hm.list(args.limit))
+elif args.cmd == "clear": print(hm.clear())
+else: print("PromptLab v10 ready!")
